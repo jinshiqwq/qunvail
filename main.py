@@ -1,13 +1,11 @@
-# main.py
 import asyncio
 import aiohttp
 from typing import Set, List
 
-from astrbot.api.event import filter, AstrMessageEvent, GroupMemberIncreaseEvent
+from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.message_components import Plain
-from astrbot.api.platform import PlatformAdapter
 
 VERIFY_URL = "http://qun.2b2t.biz/vailed.php"
 
@@ -15,23 +13,29 @@ VERIFY_URL = "http://qun.2b2t.biz/vailed.php"
 @register(
     "astrbot_plugin_qun_verify",
     "Soulter",
-    "进群验证：未验证的成员 5 分钟内踢出",
+    "进群验证：未在 http://qun.2b2t.biz 验证的成员 5 分钟内踢出",
     "1.0.0",
 )
 class QunVerifyPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
         cfg = context.get_config()
-        # 支持在 AstrBot 管理面板里配置群号
-        self.target_groups: List[str] = cfg.get("qun_verify_groups", [])
-        self.pending: Set[str] = set()  # 正在验证的 qq
+        self.target_groups: List[str] = [str(g) for g in cfg.get("qun_verify_groups", [])]
+        self.pending: Set[str] = set()
         logger.info(f"[qun_verify] 已加载，目标群：{self.target_groups}")
 
-    # 群成员增加事件
-    @filter.event(GroupMemberIncreaseEvent)
-    async def on_member_increase(self, event: GroupMemberIncreaseEvent):
-        gid = str(event.group_id)
-        uid = str(event.user_id)
+    # 1. 监听群成员增加事件
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def on_event(self, event: AstrMessageEvent):
+        # 只处理 notice 类型里的 group_member_increase
+        if event.message_obj.type.value != "notice":
+            return
+        raw = event.message_obj.raw_message
+        if raw.get("notice_type") != "group_increase":
+            return
+
+        gid = str(raw["group_id"])
+        uid = str(raw["user_id"])
         if gid not in self.target_groups:
             return
 
@@ -39,7 +43,7 @@ class QunVerifyPlugin(Star):
         self.pending.add(uid)
         asyncio.create_task(self._verify_and_kick(event, gid, uid))
 
-    # 普通消息：未验证成员的消息直接撤回
+    # 2. 未验证成员的消息直接撤回
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def on_group_msg(self, event: AstrMessageEvent):
         gid = str(event.group_id)
@@ -52,9 +56,9 @@ class QunVerifyPlugin(Star):
         except Exception as e:
             logger.warning(f"[qun_verify] 撤回失败: {e}")
 
-    async def _verify_and_kick(self, event: GroupMemberIncreaseEvent, gid: str, uid: str):
-        adapter: PlatformAdapter = event.platform_adapter
-        max_retry = 30  # 10s * 30 = 5min
+    async def _verify_and_kick(self, event: AstrMessageEvent, gid: str, uid: str):
+        adapter = event.platform_adapter
+        max_retry = 30
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as sess:
             for _ in range(max_retry):
                 try:
@@ -65,12 +69,8 @@ class QunVerifyPlugin(Star):
                             logger.info(f"[qun_verify] {uid} 验证通过")
                             self.pending.discard(uid)
                             return
-                        elif text == "no":
-                            pass
-                        else:
-                            logger.warning(f"[qun_verify] 接口返回异常: {text}")
                 except Exception as e:
-                    logger.error(f"[qun_verify] 请求验证接口失败: {e}")
+                    logger.error(f"[qun_verify] 验证接口异常: {e}")
                 await asyncio.sleep(10)
 
         # 超时踢人
