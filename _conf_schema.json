@@ -1,0 +1,8 @@
+{
+  "qun_verify_groups": {
+    "type": "list",
+    "description": "需要验证的群号列表",
+    "items": { "type": "string" },
+    "default": []
+  }
+}
